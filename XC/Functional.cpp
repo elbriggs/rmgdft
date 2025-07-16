@@ -102,7 +102,7 @@ extern "C" void xc_spin (double *rho, double *zeta, double *ex, double *ec, doub
 
 extern "C" void nlc (double *rho_valence, double *rho_core, int *nspin, double *ec, double *vx, double *vc);
 extern "C" void xc_gcx (int *length, int*nspin, double *rho, double *grho, double *sx, double *sc, 
-                                  double *v1x, double *v2x, double *v1c, double *v2c, bool *gargs);
+                                  double *v1x, double *v2x, double *v1c, double *v2c, double *v2cud, bool *gargs);
 extern "C" void gcx_spin(double *rhoup, double *rhodown, double *grhoup, double *grhodown, double *sx,
                                   double *v1xup, double *v1xdw, double *v2xup, double *v2xdw);
 extern "C" void gcc_spin_more( double *arho_up, double *arho_down,  double *grhoup, double *grhodw, double *grhoud,
@@ -397,11 +397,15 @@ void Functional::v_xc(double *rho_in, double *rho_core, double &etxc, double &vt
         // for collinear case, spin up and down are in different processor groups.
         if(pct.spinpe == 0) {
             for(int ix=0;ix < this->pbasis;ix++) trho.dw[ix] = rho_in[ix] - rho_in[ix+this->pbasis];
+            rho_up = rho_in;
+            rho_down = &rho_in[this->pbasis];
             v_up = v;
             v_down = &v[this->pbasis];
         }
         else {
             for(int ix=0;ix < this->pbasis;ix++) trho.dw[ix] = rho_in[ix+this->pbasis] - rho_in[ix];
+            rho_down = rho_in;
+            rho_up = &rho_in[this->pbasis];
             v_down = v;
             v_up = &v[this->pbasis];
         }
@@ -672,27 +676,18 @@ void Functional::gradcorr(double *rho, double *rho_core, double &etxc, double &v
 
     // Have to convert 2D array to Fortran order for QE routine.
     CToF_2d(this->pbasis, grho, grhof);
+    double *v2dummy=NULL;
     xc_gcx( &this->pbasis, &ione, rhoout.data(), grhof, sx.data(), sc.data(), v1x.data(),
-            v2x.data(), v1c.data(), v2c.data(), &gargs);
+            v2x.data(), v1c.data(), v2c.data(), v2dummy, &gargs);
 
     for(int k=0;k < this->pbasis;k++)
     {
-        double grho2 = gx[k]*gx[k] + gy[k]*gy[k] + gz[k]*gz[k];
-        double arho = fabs(rhoout[k]);
-
-        if((arho > epsr) && (grho2 > epsg))
-        {
-            // ... first term of the gradient correction : D(rho*Exc)/D(rho)
-            v[k] = v[k] + (v1x[k] + v1c[k]);
-            //  used later for second term of the gradient correction
-            vxc2[k] = ( v2x[k] + v2c[k] );
-            vtxcgc = vtxcgc + (v1x[k] + v1c[k]) * (rhoout[k] - rho_core[k]);
-            etxcgc = etxcgc + sx[k] + sc[k];
-        }
-        else
-        {
-            vxc2[k] = 0.0;
-        }
+        // ... first term of the gradient correction : D(rho*Exc)/D(rho)
+        v[k] += v1x[k] + v1c[k];
+        //  used later for second term of the gradient correction
+        vxc2[k] = ( v2x[k] + v2c[k] );
+        vtxcgc += (v1x[k] + v1c[k]) * (rhoout[k] - rho_core[k]);
+        etxcgc += sx[k] + sc[k];
     } 
 
     // 
@@ -732,6 +727,8 @@ void Functional::gradcorr_spin(double *rho_up, double *rho_down, double *rho_cor
 {
     if(!this->dft_is_gradient_rmg()) return;
 
+    int itwo = 2;
+    bool gargs = false;
     double etxcgc = 0.0;
     double vtxcgc = 0.0;
 
@@ -739,15 +736,13 @@ void Functional::gradcorr_spin(double *rho_up, double *rho_down, double *rho_cor
     const double epsg = 1.0e-10;
     double epsg_guard = ct.epsg_guard;
 
-    double *grho_up = new double[3*this->pbasis];
-    double *grho_down = new double[3*this->pbasis];
+    double *grho_up = new double[6*this->pbasis];
+    double *grho_down = grho_up + 3*this->pbasis;
     double *vxc2_up = this->vxc2;
     double *vxc2_down = vxc2_up + this->pbasis;
     double *v2cud = this->v2cud;
     double *rhoout_up = new double[this->pbasis];
     double *rhoout_down = new double[this->pbasis];
-
-
 
     double *gx_up = grho_up;
     double *gy_up = gx_up + this->pbasis;
@@ -760,16 +755,29 @@ void Functional::gradcorr_spin(double *rho_up, double *rho_down, double *rho_cor
     for(int ix=0;ix < this->pbasis;ix++) rhoout_up[ix] = rho_up[ix] + 0.5*rho_core[ix];
     for(int ix=0;ix < this->pbasis;ix++) rhoout_down[ix] = rho_down[ix] + 0.5*rho_core[ix];
 
-
     // calculate the gradient of rho + rho_core up
     RmgTimer *RT2 = new RmgTimer("5-Functional: apply gradient");
     ApplyGradient (rhoout_up, gx_up, gy_up, gz_up, fd_order, "Fine");
     ApplyGradient (rhoout_down, gx_down, gy_down, gz_down, fd_order, "Fine");
+
     delete RT2;
 
+    fgobj<double> ex, ec;
+    spinobj<double> v1x, v2x, v1c, v2c, trho;
+
+    // QE routines expect total charge + magnetization stored sequentially.
+    for(int ix=0;ix < this->pbasis;ix++) trho.up[ix] = rhoout_up[ix];
+    for(int ix=0;ix < this->pbasis;ix++) trho.dw[ix] = rhoout_down[ix];
+
+    double *grhof = new double[6*this->pbasis]();
+    CToF_2d(this->pbasis, gx_up, grhof);
+    CToF_2d(this->pbasis, gx_down, grhof + 3*this->pbasis);
+    xc_gcx(&this->pbasis, &itwo, trho.data(), grhof, ex.data(), ec.data(),
+            v1x.data(), v2x.data(), v1c.data(), v2c.data(), v2cud, &gargs);
+    delete [] grhof;
 
     RmgTimer *RT4 = new RmgTimer("5-Functional: libxc");
-#pragma omp parallel for reduction(+:etxcgc,vtxcgc)
+///#pragma omp parallel for reduction(+:etxcgc,vtxcgc)
     for(int k=0;k < this->pbasis;k++) {
         double arho_up = fabs(rhoout_up[k]);
         double arho_down = fabs(rhoout_down[k]);
@@ -778,64 +786,20 @@ void Functional::gradcorr_spin(double *rho_up, double *rho_down, double *rho_cor
         grho2[0] = gx_up[k]*gx_up[k] + gy_up[k]*gy_up[k] + gz_up[k]*gz_up[k];
         grho2[1] = gx_down[k]*gx_down[k] + gy_down[k]*gy_down[k] + gz_down[k]*gz_down[k];
 
-        double pgrho2_up = grho2[0] + epsg_guard;
-        double pgrho2_down = grho2[1] + epsg_guard;
-        double v1xup, v1xdw, v2xup, v2xdw, sx;
+//        if((arho_up > epsr) && (arho_down > epsr) && (grho2[0] > epsg) && (grho2[1] > epsg))
+        {
 
-        gcx_spin( &arho_up, &arho_down, &pgrho2_up,
-                &pgrho2_down, &sx, &v1xup, &v1xdw, &v2xup, &v2xdw );
+            // first term of the gradient correction : D(rho*Exc)/D(rho)
+            v_up[k] += (v1x.up[k] + v1c.up[k]);
+            v_down[k] += ( v1x.dw[k] + v1c.dw[k]);
 
-        double sc    = 0.0;
-        double v1cup = 0.0;
-        double v1cdw = 0.0;
-        double v2c   = 0.0;
-        double v2cup = 0.0;
-        double v2cdw = 0.0;
-        v2cud[k] = 0.0;
+            vtxcgc += (v1x.up[k] + v1c.up[k]) * ( rhoout_up[k] - 0.5*rho_core[k]);
+            vtxcgc += (v1x.dw[k] + v1c.dw[k]) * ( rhoout_down[k] - 0.5*rho_core[k]);
+            etxcgc += (ex[k] + ec[k]);
 
-        if(arho > epsr && grho2[0] > epsg && grho2[1] > epsg) {
-
-            if(igcc_is_lyp()) {
-
-                double grhoup = gx_up[k]*gx_up[k] + gy_up[k]*gy_up[k] + gz_up[k]*gz_up[k];
-                double grhodw = gx_down[k]*gx_down[k] + gy_down[k]*gy_down[k] + gz_down[k]*gz_down[k];
-                double grhoud = gx_up[k]*gx_down[k] + gy_up[k]*gy_down[k] + gz_up[k]*gz_down[k];
-
-                gcc_spin_more( &arho_up, &arho_down, &grhoup, &grhodw, &grhoud,
-                        &sc, &v1cup, &v1cdw, &v2cup, &v2cdw, &v2cud[k] );
-
-            }
-            else {
-
-                double zeta = ( rhoout_up[k] - rhoout_down[k]) / arho;
-                zeta = (arho_up - arho_down) / arho;
-                double grh2 = (gx_up[k] + gx_down[k]) * (gx_up[k] + gx_down[k]) +
-                    (gy_up[k] + gy_down[k]) * (gy_up[k] + gy_down[k]) +
-                    (gz_up[k] + gz_down[k]) * (gz_up[k] + gz_down[k]);
-
-                grh2 += epsg_guard;
-                gcc_spin( &arho, &zeta, &grh2, &sc, &v1cup, &v1cdw, &v2c );
-                v2cup = v2c;
-                v2cdw = v2c;
-                v2cud[k] = v2c;
-
-
-                // first term of the gradient correction : D(rho*Exc)/D(rho)
-                v_up[k] = v_up[k] + ( v1xup + v1cup );
-                v_down[k] = v_down[k] + ( v1xdw + v1cdw );
-
-                vtxcgc = vtxcgc +
-                    ( v1xup + v1cup ) * ( rhoout_up[k] - 0.5*rho_core[k]);
-                vtxcgc = vtxcgc + 
-                    ( v1xdw + v1cdw ) * ( rhoout_down[k] - 0.5*rho_core[k]);
-                etxcgc = etxcgc + ( sx + sc );
-
-                //  used later for second term of the gradient correction
-                vxc2_up[k] = ( v2xup + v2cup );
-                vxc2_down[k] = ( v2xdw + v2cdw );
-
-            }
-
+            //  used later for second term of the gradient correction
+            vxc2_up[k] = (v2x.up[k] + v2c.up[k]);
+            vxc2_down[k] = (v2x.dw[k] + v2c.dw[k]);
         }
 
     }
@@ -844,6 +808,7 @@ void Functional::gradcorr_spin(double *rho_up, double *rho_down, double *rho_cor
     delete [] rhoout_up;
 
     double *h = new double[6*this->pbasis]();
+#if 1
 
     double *hx_up = h;
     double *hy_up = h + this->pbasis;
@@ -861,8 +826,7 @@ void Functional::gradcorr_spin(double *rho_up, double *rho_down, double *rho_cor
         hy_dw[k] = vxc2_down[k] * gy_down[k] + v2cud[k] * gy_up[k];
         hz_dw[k] = vxc2_down[k] * gz_down[k] + v2cud[k] * gz_up[k];
     }
-    
-        
+
     // second term of the gradient correction
     RmgTimer *RT5 = new RmgTimer("5-Functional: apply gradient");
     ApplyGradient (hx_up, gx_up, gy_up, gz_up, fd_order, "Fine");
@@ -889,16 +853,14 @@ void Functional::gradcorr_spin(double *rho_up, double *rho_down, double *rho_cor
         v_up[k] -= gz_up[k];
         v_down[k] -= gz_down[k];
     }
-
     delete RT5;
 
+#endif
     vtxc = vtxc + vtxcgc;
     etxc = etxc + etxcgc;
-
     delete RT4;
 
     delete [] h;
-    delete [] grho_down;
     delete [] grho_up;
 }
 
