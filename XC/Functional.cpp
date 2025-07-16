@@ -1,4 +1,3 @@
-
 /*
  *
  * Copyright 2014 The RMG Project Developers. See the COPYRIGHT file 
@@ -59,11 +58,11 @@
 #define igcc_is_lyp             RMG_FC_MODULE(dft_setting_routines,igcc_is_lyp,mod_FUNCT,IGCC_IS_LYP)
 #define dft_has_finite_size_correction RMG_FC_MODULE(dft_setting_routines,dft_has_finite_size_correction,mod_FUNCT,DFT_HAS_FINITE_SIZE_CORRECTION)
 #define dft_is_nonlocc          RMG_FC_MODULE(funct,dft_is_nonlocc,mod_FUNCT,DFT_IS_NONLOCC)
-#define xc_metagcx xc_metagcx_
 #define xc_spin                 RMG_FC_MODULE(funct,xc_spin,mod_FUNCT,XC)
 #define nlc                     RMG_FC_MODULE(funct,nlc,mod_FUNCT,NLC)
 #define xc_gcx                  RMG_FC_GLOBAL(xc_gcx, XC_GCX)
 #define xc                      RMG_FC_GLOBAL(xc, XC)
+#define xc_metagcx              RMG_FC_GLOBAL(xc_metagcx, XC_METAGCX)
 #define xc_lsda                 RMG_FC_MODULE(qe_drivers_lda_lsda,xc_lsda,mod_FUNCT,XC_LSDA)
 #define gcx_spin                RMG_FC_MODULE(qe_drivers_gga,gcx_spin,mod_FUNCT,GCX_SPIN)
 #define gcc_spin_more           RMG_FC_MODULE(qe_drivers_gga,gcc_spin_more,mod_FUNCT,GCC_SPIN_MORE)
@@ -94,7 +93,7 @@ extern "C" void xc_lsda (int *length, double *rho, double *zeta, double *ex, dou
 extern "C" void tau_xc (int *length, double *arho, double *grho2, double *atau, double *ex,
                         double *ec, double *v1x, double *v2x, double *v3x,
                         double *v1c, double *v2c, double *v3c);
-extern "C" void xc_metagcx_( int *length, int *ione, int *np, double *rho, double *grhof, 
+extern "C" void xc_metagcx( int *length, int *ione, int *np, double *rho, double *grhof, 
                    double *ked, double *ex, double *ec, double *v1x, double *v2x, double *v3x,
                    double *v1c, double *v2c, double *v3c, bool *gargs );
 
@@ -115,6 +114,10 @@ extern "C" double get_gau_parameter(void);
 extern "C" void set_gau_parameter(double *);
 extern "C" double get_screening_parameter(void);
 extern "C" void set_screening_parameter(double *);
+#if __LIBXC
+#define xclib_init_libxc        RMG_FC_MODULE(dft_setting_routines,xclib_init_libxc,mod_FUNCT,XCLIB_INIT_LIBXC)
+extern "C" void xclib_init_libxc(int *nspin, bool *domag);
+#endif
 
 bool Functional::dft_set=false;
 bool Functional::exx_started=false;
@@ -155,6 +158,15 @@ Functional::Functional (
             bool gamma_flag)
 {
     RmgTimer RT0("5-Functional");
+#if __LIBXC
+    static bool initialized;
+    bool domag = false;
+    if(!initialized)
+    {
+        xclib_init_libxc(&ct.nspin, &domag);
+        initialized = false;
+    }
+#endif
     this->Grid = &G;
     this->T = &T;
     this->L = &L;
@@ -326,7 +338,7 @@ void Functional::v_xc(double *rho_in, double *rho_core, double &etxc, double &vt
     {
         wfobj<double> kdetau_c;
         fgobj<double> kdetau_f;
-        for(int i=0;i < kdetau_c.pbasis;i++) kdetau_c[i] = 0.0;
+        kdetau_c.set(0.0);
         for(int ik = 0; ik < ct.num_kpts_pe; ik++) Kptr_g[ik]->KineticEnergyDensity(kdetau_c.data());
         FftInterpolation(*Rmg_G, kdetau_c.data(), kdetau_f.data(), 2, false);
         v_xc_meta(rho_in, rho_core, etxc, vtxc, v, kdetau_f.data(), nspin);
@@ -336,28 +348,7 @@ void Functional::v_xc(double *rho_in, double *rho_core, double &etxc, double &vt
     double rhoneg[2]{0.0,0.0};
     double *rho_up=NULL, *rho_down=NULL;
     double *v_up=NULL, *v_down=NULL;
-    double *rho = new double[nspin*this->pbasis];
 
-    for(int ix=0;ix < this->pbasis;ix++)rho[ix] = rho_in[ix];
-    if(nspin == 4)
-    {
-        rho_up = rho;
-        rho_down = &rho[this->pbasis];
-        v_up = v;
-        v_down = &v[this->pbasis];
-        double mrho;
-        
-        for(int idx = 0; idx < this->pbasis; idx++)
-        {
-            mrho = rho_in[idx + this->pbasis] *rho_in[idx + this->pbasis];
-            mrho += rho_in[idx + 2*this->pbasis] *rho_in[idx + 2*this->pbasis];
-            mrho += rho_in[idx + 3*this->pbasis] *rho_in[idx + 3*this->pbasis];
-            mrho = std::sqrt(mrho);
-            rho_up[idx] = 0.5 * (rho_in[idx] + mrho);
-            rho_down[idx] = 0.5* (rho_in[idx] - mrho);
-        }
-
-    }
 
 
     // First get the local exchange and correlation
@@ -369,7 +360,7 @@ void Functional::v_xc(double *rho_in, double *rho_core, double &etxc, double &vt
         fgobj<double> ex, ec, vx, vc;
         int length = ex.pbasis;
         fgobj<double> trho;
-        for(int ix=0;ix < this->pbasis;ix++) trho[ix] = rho[ix] + rho_core[ix];
+        for(int ix=0;ix < this->pbasis;ix++) trho[ix] = rho_in[ix] + rho_core[ix];
         xc ( &length, &ione, &ione, trho.data(), ex.data(), ec.data(), vx.data(), vc.data(), &gargs);
         for(int ir=0;ir < ex.pbasis;ir++)
         {
@@ -430,13 +421,32 @@ void Functional::v_xc(double *rho_in, double *rho_core, double &etxc, double &vt
         vtxc += vtxcl;
 
     }
+    else if(nspin == 4)
+    {
+        rho_up = rho_in;
+        rho_down = &rho_in[this->pbasis];
+        v_up = v;
+        v_down = &v[this->pbasis];
+        double mrho;
+        
+        for(int idx = 0; idx < this->pbasis; idx++)
+        {
+            mrho = rho_in[idx + this->pbasis] *rho_in[idx + this->pbasis];
+            mrho += rho_in[idx + 2*this->pbasis] *rho_in[idx + 2*this->pbasis];
+            mrho += rho_in[idx + 3*this->pbasis] *rho_in[idx + 3*this->pbasis];
+            mrho = std::sqrt(mrho);
+            rho_up[idx] = 0.5 * (rho_in[idx] + mrho);
+            rho_down[idx] = 0.5* (rho_in[idx] - mrho);
+        }
+
+    }
     delete RT2;
 
 
     // Next add in any gradient corrections
     RmgTimer *RT3 = new RmgTimer("5-Functional: vxc grad");
     if(nspin == 1) {
-        this->gradcorr(rho, rho_core, etxc, vtxc, v);
+        this->gradcorr(rho_in, rho_core, etxc, vtxc, v);
     }
     else {
         this->gradcorr_spin(rho_up, rho_down, rho_core, etxc, vtxc, v_up, v_down);
@@ -472,6 +482,7 @@ void Functional::v_xc(double *rho_in, double *rho_core, double &etxc, double &vt
             }
         }    
     }
+
     // And finally any non-local corrections
     RmgTimer *RT4 = new RmgTimer("5-Functional: vxc nonlocal");
     if(this->dft_is_nonlocc_rmg()) {
@@ -481,7 +492,7 @@ void Functional::v_xc(double *rho_in, double *rho_core, double &etxc, double &vt
 
         }
         double netxc=0.0, nvtxc=0.0;
-        this->nlc_rmg(rho, rho_core, netxc, nvtxc, v);
+        this->nlc_rmg(rho_in, rho_core, netxc, nvtxc, v);
         vtxc += nvtxc;
         etxc += netxc;
     }
@@ -493,7 +504,6 @@ void Functional::v_xc(double *rho_in, double *rho_core, double &etxc, double &vt
     vtxc = RmgSumAll(vtxc, this->T->get_MPI_comm());
     etxc = RmgSumAll(etxc, this->T->get_MPI_comm());
 
-    delete [] rho;
     if(Rmg_G->default_FG_RATIO > 1)
     {
         for(int is = 0; is < nspin; is++)
@@ -535,7 +545,7 @@ void Functional::v_xc_meta(double *rho_in, double *rho_core, double &etxc, doubl
 //        tau_xc (&length, rho.data(), grho2.data(), ked, ex.data(), ec.data(), 
 //                v1x.data(), v2x.data(), v3x.data(), 
 //                v1c.data(), v2c.data(), v3c.data());
-        xc_metagcx_( &length, &ione, &np, rho.data(), grhof, ked, 
+        xc_metagcx( &length, &ione, &np, rho.data(), grhof, ked, 
                    ex.data(), ec.data(), v1x.data(), v2x.data(), v3x.data(),
                    v1c.data(), v2c.data(), v3c.data(), &gargs );
 
