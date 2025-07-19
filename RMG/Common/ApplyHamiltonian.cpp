@@ -31,6 +31,8 @@
 #include "Solvers.h"
 #include "transition.h"
 #include "rmg_complex.h"
+#include "Functional.h"
+#include "RmgSumAll.h"
 
 
 template double ApplyHamiltonian<double,float>(Kpoint<double> *, int, float *, float *, double *, double *, double *, bool);
@@ -89,6 +91,31 @@ double ApplyHamiltonian (Kpoint<KpointType> *kptr, int istate, CalcType * __rest
         h_psi[idx] = -0.5 * h_psi[idx] + nv[idx] + (veff[idx] + tmag)*psi[idx];
     }
 
+#if 1
+    Functional F (*Rmg_G, Rmg_L, *Rmg_T, ct.is_gamma);
+    if(F.dft_is_meta_rmg())
+    {
+        double occ = kptr->Kstates[istate].occupation[0];
+        wfobj<CalcType> gx, gy, gz, hx, hy, hz, htmp; 
+        htmp.set(0.0);
+        ApplyGradient<CalcType> (psi, gx.data(), gy.data(), gz.data(), ct.kohn_sham_fd_order, "Coarse");
+    
+        for(int ix=0;ix < pbasis;ix++) gx[ix] *= F.ke_taur_wf[ix];
+        for(int ix=0;ix < pbasis;ix++) gy[ix] *= F.ke_taur_wf[ix];
+        for(int ix=0;ix < pbasis;ix++) gz[ix] *= F.ke_taur_wf[ix];
+
+        ApplyGradient<CalcType> (gx.data(), hx.data(), hy.data(), hz.data(), ct.kohn_sham_fd_order, "Coarse");
+        for(int ix=0;ix < pbasis;ix++) htmp[ix] -= hx[ix];
+        ApplyGradient<CalcType> (gy.data(), hx.data(), hy.data(), hz.data(), ct.kohn_sham_fd_order, "Coarse");
+        for(int ix=0;ix < pbasis;ix++) htmp[ix] -= hy[ix];
+        ApplyGradient<CalcType> (gz.data(), hx.data(), hy.data(), hz.data(), ct.kohn_sham_fd_order, "Coarse");
+        for(int ix=0;ix < pbasis;ix++) htmp[ix] -= hz[ix];
+        double msum = 0.0;
+        for(int ix=0;ix < pbasis;ix++) msum += std::real(std::conj(htmp[ix])*psi[ix]);
+        for(int ix=0;ix < pbasis;ix++) h_psi[ix] += htmp[ix];
+        kptr->Kstates[istate].e_meta_xc = get_vel()*RmgSumAll(msum, pct.grid_comm);
+   } 
+#endif
 
     if(ct.noncoll)
     {

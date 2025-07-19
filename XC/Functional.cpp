@@ -336,11 +336,22 @@ void Functional::v_xc(double *rho_in, double *rho_core, double &etxc, double &vt
 
     if(dft_is_meta())
     {
+        int wf_pbasis = Rmg_G->get_P0_BASIS(1);
         wfobj<double> kdetau_c;
         fgobj<double> kdetau_f;
         kdetau_c.set(0.0);
-        for(int ik = 0; ik < ct.num_kpts_pe; ik++) Kptr_g[ik]->KineticEnergyDensity(kdetau_c.data());
-        FftInterpolation(*Rmg_G, kdetau_c.data(), kdetau_f.data(), 2, false);
+        if(!this->ke_density) this->ke_density = new double[this->pbasis]();
+        if(!this->ke_taur) this->ke_taur = new double[ct.nspin*this->pbasis]();
+        if(!this->ke_taur_wf) this->ke_taur_wf = new double[ct.nspin*wf_pbasis]();
+        if(ct.scf_steps >= 0)
+        {
+            for(int ik = 0; ik < ct.num_kpts_pe; ik++) Kptr_g[ik]->KineticEnergyDensity(kdetau_c.data());
+            FftInterpolation(*Rmg_G, kdetau_c.data(), kdetau_f.data(), 2, false);
+        }
+        else
+        {
+            for(int ix=0;ix < this->pbasis;ix++) kdetau_f[ix] = this->ke_density[ix];
+        }
         v_xc_meta(rho_in, rho_core, etxc, vtxc, v, kdetau_f.data(), nspin);
         return;
     }
@@ -515,18 +526,19 @@ void Functional::v_xc(double *rho_in, double *rho_core, double &etxc, double &vt
 void Functional::v_xc_meta(double *rho_in, double *rho_core, double &etxc, double &vtxc, double *v, double *ked, int nspin)
 {
     double eps8 = 1.0e-8, eps12 = 1.0e-12;
+    double tpiba = 2.0 * PI / Rmg_L.celldm[0];
     etxc = 0.0;
     vtxc = 0.0;
     double rhoneg[2];
-    double tpiba = 2.0 * PI / Rmg_L.celldm[0];
     int np = 1;
     int ione = 1;
+    int itwo = 2;
     bool gargs = false;
     if(nspin == 2) np=3;
 
     if(nspin == 1)
     {
-        fgobj<double> rho, grho2, lrho;
+        fgobj<double> rho, grho2, lrho, d2rho;
         fgobj<double> hx, hy, hz, dh1, dh2, dh3;
         fgobj<double> ex, ec, v1x, v2x, v3x, v1c, v2c, v3c;
         double *gx = new double[3*this->pbasis];
@@ -542,9 +554,6 @@ void Functional::v_xc_meta(double *rho_in, double *rho_core, double &etxc, doubl
         //ApplyLaplacian (rho.data(), lrho.data(), fd_order, "Fine");
 
         int length = this->pbasis;
-//        tau_xc (&length, rho.data(), grho2.data(), ked, ex.data(), ec.data(), 
-//                v1x.data(), v2x.data(), v3x.data(), 
-//                v1c.data(), v2c.data(), v3c.data());
         xc_metagcx( &length, &ione, &np, rho.data(), grhof, ked, 
                    ex.data(), ec.data(), v1x.data(), v2x.data(), v3x.data(),
                    v1c.data(), v2c.data(), v3c.data(), &gargs );
@@ -556,15 +565,14 @@ void Functional::v_xc_meta(double *rho_in, double *rho_core, double &etxc, doubl
 //            if ((arho > eps8) && (grho2[ix] > eps12) && (std::abs(atau) > eps8))
 if(1)
             {
-                v[ix] =  (v1x[ix] + v1c[ix]);
-
+                v[ix] +=  (v1x[ix] + v1c[ix]);
                 // h contains D(rho*Exc)/D(|grad rho|) * (grad rho) / |grad rho|
-                hx[ix] =  (v2x[ix] + v2c[ix])*gx[ix];
-                hy[ix] =  (v2x[ix] + v2c[ix])*gy[ix];
-                hz[ix] =  (v2x[ix] + v2c[ix])*gz[ix];
-                //kedtaur[ix] =  (v3x + v3c) * 0.5;
+                hx[ix] =  (v2c[ix] + v2x[ix])*gx[ix];
+                hy[ix] =  (v2c[ix] + v2x[ix])*gy[ix];
+                hz[ix] =  (v2c[ix] + v2x[ix])*gz[ix];
+                ke_taur[ix] =  (v3x[ix] + v3c[ix]) * 0.5;
                 etxc = etxc +  (ex[ix] + ec[ix]); // * segno
-                vtxc = vtxc +  0.5*(v1x[ix]+v1c[ix])*rho[ix];
+                vtxc = vtxc +  0.5*(v1x[ix]+v1c[ix])*rho_in[ix];
             }
             else
             {
@@ -572,14 +580,16 @@ if(1)
                 hx[ix] = 0.0;
                 hy[ix] = 0.0;
                 hz[ix] = 0.0;
-                //kedtaur[ix] = 0.0;
+                ke_taur[ix] = 0.0;
             }
         }
-        // rhoneg stuff?
+
+#if 1
         ApplyGradient (hx.data(), dh1.data(), dh2.data(), dh3.data(), fd_order, "Fine");
         for(int ix=0;ix < rho.pbasis;ix++)
         {
              double dh = hx[ix]*dh1[ix];
+dh = dh1[ix];
              v[ix] -= dh;
              vtxc -= dh * rho_in[ix];
         }
@@ -587,6 +597,7 @@ if(1)
         for(int ix=0;ix < rho.pbasis;ix++)
         {
              double dh = hy[ix]*dh2[ix];
+dh = dh2[ix];
              v[ix] -= dh;
              vtxc -= dh * rho_in[ix];
         }
@@ -594,24 +605,72 @@ if(1)
         for(int ix=0;ix < rho.pbasis;ix++)
         {
              double dh = hz[ix]*dh3[ix];
+dh = dh3[ix];
              v[ix] -= dh;
              vtxc -= dh * rho_in[ix];
         }
-
+#endif
         delete [] grhof;
         delete [] gx;
     }
-    if(nspin == 2)
+    else if(nspin == 2)
     {
+        fgobj<double> ex, ec;
+        spinobj<double> v1x, v2x, v3x, v1c, v2c, v3c;
         spinobj<double> rho, grho2;
-        spinobj<double> gx, gy, gz;
-        for(int ix=0;ix < rho.pbasis;ix++)rho[ix] = rho_in[ix] + rho_core[ix];
-        ApplyGradient (rho.up.data(), gx.up.data(), gy.up.data(), gz.up.data(), fd_order, "Fine");
-        ApplyGradient (rho.dw.data(), gx.dw.data(), gy.dw.data(), gz.dw.data(), fd_order, "Fine");
-        for(int ix=0;ix < rho.pbasis;ix++)
+        double *rho_up, *rho_dw, *v_up, *v_dw;
+
+        double *gx_up = new double[3*this->pbasis];
+        double *gy_up = gx_up + this->pbasis;
+        double *gz_up = gy_up + this->pbasis;
+        double *gx_dw = new double[3*this->pbasis];
+        double *gy_dw = gx_dw + this->pbasis;
+        double *gz_dw = gy_dw + this->pbasis;
+        double *grhof = new double[6*this->pbasis];
+        if(pct.spinpe == 0) {
+            rho_up = rho_in;
+            rho_dw = &rho_in[this->pbasis];
+            v_up = v;
+            v_dw = &v[this->pbasis];
+        }
+        else {
+            rho_dw = rho_in;
+            rho_up = &rho_in[this->pbasis];
+            v_dw = v;
+            v_up = &v[this->pbasis];
+        }
+        for(int ix=0;ix < this->pbasis;ix++)
         {
-            grho2.up[ix] = gx.up[ix]*gx.up[ix] + gy.up[ix]*gy.up[ix] + gz.up[ix]*gz.up[ix];
-            grho2.dw[ix] = gx.dw[ix]*gx.dw[ix] + gy.dw[ix]*gy.dw[ix] + gz.dw[ix]*gz.dw[ix];
+            rho.up[ix] = rho_up[ix] + 0.5*rho_core[ix];
+            rho.dw[ix] = rho_dw[ix] + 0.5*rho_core[ix];
+        }
+        ApplyGradient (rho.up.data(), gx_up, gy_up, gz_up, fd_order, "Fine");
+        ApplyGradient (rho.dw.data(), gx_dw, gy_dw, gz_dw, fd_order, "Fine");
+        CToF_2d(this->pbasis, gx_up, grhof);
+        CToF_2d(this->pbasis, gx_dw, grhof+3*this->pbasis);
+        int length = this->pbasis;
+        xc_metagcx( &length, &itwo, &np, rho.data(), grhof, ked, 
+                   ex.data(), ec.data(), v1x.data(), v2x.data(), v3x.data(),
+                   v1c.data(), v2c.data(), v3c.data(), &gargs );
+
+        for(int ix=0;ix < this->pbasis;ix++)
+        {
+            v_up[ix] = v1x.up[ix] + v1c.up[ix];
+            v_dw[ix] = v1x.dw[ix] + v1c.dw[ix];
+
+                // h contains D(rho*Exc)/D(|grad rho|) * (grad rho) / |grad rho|
+#if 0
+                hx_up[ix] =  (v2x.up[ix] + v2c.up[ix])*gx.up[ix];
+                hy_up[ix] =  (v2x.up[ix] + v2c.up[ix])*gy.up[ix];
+                hz_up[ix] =  (v2x.up[ix] + v2c.up[ix])*gz.up[ix];
+                hx_dw[ix] =  (v2x.dw[ix] + v2c.dw[ix])*gx.dw[ix];
+                hy_dw[ix] =  (v2x.dw[ix] + v2c.dw[ix])*gy.dw[ix];
+                hz_dw[ix] =  (v2x.dw[ix] + v2c.dw[ix])*gz.dw[ix];
+#endif
+                ke_taur[ix] =  (v3x[ix] + v3c[ix]) * 0.5;
+                etxc = etxc +  (ex[ix] + ec[ix]);
+                vtxc = vtxc +  0.5*(v1x[ix]+v1c[ix])*rho_in[ix];
+
         }
     } 
 
@@ -623,10 +682,15 @@ if(1)
 
     if(Rmg_G->default_FG_RATIO > 1)
     {
+        int wf_pbasis = Rmg_G->get_P0_BASIS(1);
         for(int is = 0; is < nspin; is++)
+        {
             FftFilter(&v[is*pbasis], *fine_pwaves, *coarse_pwaves, LOW_PASS);
+            FftFilter(&ke_taur[is*pbasis], *fine_pwaves, *coarse_pwaves, LOW_PASS);
+            GetVtotPsi (&ke_taur_wf[is*wf_pbasis], 
+                        &ke_taur[is*pbasis], Rmg_G->default_FG_RATIO);
+        }
     }
-
 }
 
 // Applies non-local corrections for the correlation

@@ -235,6 +235,17 @@ void GetTe (spinobj<double> &rho, fgobj<double> &rhocore, fgobj<double> &rhoc, f
     /*XC potential energy */
     xcstate = vel * RmgSumAll(xcstate, pct.grid_comm);
 
+    Functional F (*Rmg_G, Rmg_L, *Rmg_T, ct.is_gamma);
+    if(F.dft_is_meta_rmg())
+    {
+        double t1 = 0.0;
+        for (int is = 0; is < ct.num_states; is++)
+        { 
+            t1 += kptr->Kstates[is].occupation[0] * kptr->Kstates[is].e_meta_xc;
+        }
+        xcstate += t1;
+    }
+
 
     if(ii_flag) {
 
